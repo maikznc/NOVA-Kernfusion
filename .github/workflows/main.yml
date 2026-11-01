@@ -1,0 +1,122 @@
+# =====================================================================================
+#  NOVA Kernfusion – automatischer Build auf GitHub (Mac + Windows)
+#
+#  SO EINFÜGEN:
+#  1. Im GitHub-Repo auf "Add file" → "Create new file" klicken.
+#  2. Als Dateinamen genau das eintippen:   .github/workflows/build.yml
+#     (bei jedem "/" legt GitHub automatisch einen Ordner an)
+#  3. Den kompletten Inhalt DIESER Datei hineinkopieren (Cmd + A, Cmd + C) und
+#     unten auf "Commit changes" klicken.
+#
+#  Danach baut GitHub bei jeder Änderung automatisch:
+#  - Mac: VST3 + AU (Apple Silicon + Intel) als Installer (.pkg) und ZIP
+#  - Windows: VST3 (64 Bit) als ZIP
+#  Download: Repo → "Actions" → letzter grüner Lauf → ganz unten bei "Artifacts".
+# =====================================================================================
+
+name: NOVA Kernfusion bauen
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ "v*" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  mac:
+    name: Mac (VST3 + AU)
+    runs-on: macos-15
+    timeout-minutes: 75
+
+    steps:
+      - name: Code holen
+        uses: actions/checkout@v4
+
+      - name: Konfigurieren
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DMS_BUILD_TESTS=ON
+
+      - name: Bauen
+        run: cmake --build build --config Release --target Kernfusion_VST3 Kernfusion_AU KernfusionTests -j 4
+
+      - name: Tests
+        run: ./build/tests/KernfusionTests_artefacts/Release/KernfusionTests
+
+      - name: Plugins pruefen (pluginval)
+        run: |
+          curl -sSL -o pluginval.zip https://github.com/Tracktion/pluginval/releases/download/v1.0.4/pluginval_macOS.zip
+          unzip -q pluginval.zip
+          PV=./pluginval.app/Contents/MacOS/pluginval
+          "$PV" --strictness-level 10 --skip-gui-tests --timeout-ms 300000 \
+                --validate "build/plugins/Kernfusion/Kernfusion_artefacts/Release/VST3/NOVA Kernfusion.vst3"
+          killall -9 AudioComponentRegistrar 2>/dev/null || true
+          "$PV" --strictness-level 10 --skip-gui-tests --timeout-ms 300000 \
+                --validate "$HOME/Library/Audio/Plug-Ins/Components/NOVA Kernfusion.component"
+
+      - name: Signieren und Installer bauen
+        run: bash scripts/package-macos.sh
+
+      - name: Ergebnis bereitstellen
+        uses: actions/upload-artifact@v4
+        with:
+          name: NOVA-Kernfusion-Mac
+          path: dist/*
+          if-no-files-found: error
+
+  windows:
+    name: Windows (VST3)
+    runs-on: windows-latest
+    timeout-minutes: 75
+
+    steps:
+      - name: Code holen
+        uses: actions/checkout@v4
+
+      - name: Konfigurieren
+        run: cmake -B build -A x64 -DMS_BUILD_TESTS=ON
+
+      - name: Bauen
+        run: cmake --build build --config Release --target Kernfusion_VST3 KernfusionTests --parallel 4
+
+      - name: Tests
+        shell: bash
+        run: ./build/tests/KernfusionTests_artefacts/Release/KernfusionTests.exe
+
+      - name: Plugin pruefen (pluginval)
+        shell: bash
+        run: |
+          curl -sSL -o pluginval.zip https://github.com/Tracktion/pluginval/releases/download/v1.0.4/pluginval_Windows.zip
+          unzip -q pluginval.zip -d pluginval
+          ./pluginval/pluginval.exe --strictness-level 10 --skip-gui-tests --timeout-ms 300000 \
+                --validate "build/plugins/Kernfusion/Kernfusion_artefacts/Release/VST3/NOVA Kernfusion.vst3"
+
+      - name: Paket bauen
+        shell: pwsh
+        run: ./scripts/package-windows.ps1
+
+      - name: Ergebnis bereitstellen
+        uses: actions/upload-artifact@v4
+        with:
+          name: NOVA-Kernfusion-Windows
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Release (nur bei Versions-Tags v…)
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [ mac, windows ]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Ergebnisse holen
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Release anlegen
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
