@@ -1,24 +1,8 @@
-# =====================================================================================
-#  NOVA Kernfusion – automatischer Build auf GitHub (Mac + Windows)
-#
-#  SO EINFÜGEN:
-#  1. Im GitHub-Repo auf "Add file" → "Create new file" klicken.
-#  2. Als Dateinamen genau das eintippen:   .github/workflows/build.yml
-#     (bei jedem "/" legt GitHub automatisch einen Ordner an)
-#  3. Den kompletten Inhalt DIESER Datei hineinkopieren (Cmd + A, Cmd + C) und
-#     unten auf "Commit changes" klicken.
-#
-#  Danach baut GitHub bei jeder Änderung automatisch:
-#  - Mac: VST3 + AU (Apple Silicon + Intel) als Installer (.pkg) und ZIP
-#  - Windows: VST3 (64 Bit) als ZIP
-#  Download: Repo → "Actions" → letzter grüner Lauf → ganz unten bei "Artifacts".
-# =====================================================================================
-
 name: NOVA Kernfusion bauen
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, master ]
     tags: [ "v*" ]
   workflow_dispatch:
 
@@ -33,21 +17,55 @@ jobs:
 
     steps:
       - name: Code holen
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
+
+      - name: Projekt suchen
+        shell: bash
+        run: |
+          finde() { grep -rlF --include=CMakeLists.txt "project (NOVAKernfusion" "$1" 2>/dev/null | awk '{ print length, $0 }' | sort -n | head -n 1 | cut -d' ' -f2- || true; }
+          f="$(finde .)"
+          if [ -z "$f" ]; then
+            while IFS= read -r z; do
+              echo "Hochgeladene ZIP gefunden: $z – wird entpackt."
+              rm -rf _entpackt
+              unzip -q -o "$z" -d _entpackt || 7z x -y -o_entpackt "$z" > /dev/null || true
+              f="$(finde _entpackt)"
+              [ -z "$f" ] || break
+            done < <(find . -path ./.git -prune -o -path ./_entpackt -prune -o -iname '*.zip' -print)
+          fi
+          if [ -z "$f" ]; then
+            echo "::error::Kernfusion nicht gefunden: Im Repo fehlt die CMakeLists.txt aus dem Ordner NOVA-Kernfusion. Bitte den INHALT des Ordners NOVA-Kernfusion hochladen (alle Ordner und Dateien)."
+            echo "Im Repo liegt gerade:"
+            find . -path ./.git -prune -o -print | head -n 60 || true
+            exit 1
+          fi
+          d="$(dirname "$f")"; d="${d#./}"
+          fehlt=""
+          for teil in modules/ms_core plugins/Kernfusion/Source plugins/Kernfusion/Resources scripts packaging tests; do
+            ort="$teil"; [ "$d" = "." ] || ort="$d/$teil"
+            [ -e "$ort" ] || { echo "::error::Im Repo fehlt der Ordner $ort – bitte nachträglich hochladen."; fehlt=1; }
+          done
+          [ -z "$fehlt" ] || exit 1
+          echo "Projekt liegt in: $d"
+          echo "KF=$d" >> "$GITHUB_ENV"
 
       - name: Konfigurieren
+        working-directory: ${{ env.KF }}
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DMS_BUILD_TESTS=ON
 
       - name: Bauen
+        working-directory: ${{ env.KF }}
         run: cmake --build build --config Release --target Kernfusion_VST3 Kernfusion_AU KernfusionTests -j 4
 
       - name: Tests
+        working-directory: ${{ env.KF }}
         run: ./build/tests/KernfusionTests_artefacts/Release/KernfusionTests
 
       - name: Plugins pruefen (pluginval)
+        working-directory: ${{ env.KF }}
         run: |
           curl -sSL -o pluginval.zip https://github.com/Tracktion/pluginval/releases/download/v1.0.4/pluginval_macOS.zip
-          unzip -q pluginval.zip
+          unzip -q -o pluginval.zip
           PV=./pluginval.app/Contents/MacOS/pluginval
           "$PV" --strictness-level 10 --skip-gui-tests --timeout-ms 300000 \
                 --validate "build/plugins/Kernfusion/Kernfusion_artefacts/Release/VST3/NOVA Kernfusion.vst3"
@@ -56,13 +74,14 @@ jobs:
                 --validate "$HOME/Library/Audio/Plug-Ins/Components/NOVA Kernfusion.component"
 
       - name: Signieren und Installer bauen
+        working-directory: ${{ env.KF }}
         run: bash scripts/package-macos.sh
 
       - name: Ergebnis bereitstellen
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: NOVA-Kernfusion-Mac
-          path: dist/*
+          path: ${{ env.KF }}/dist/*
           if-no-files-found: error
 
   windows:
@@ -72,35 +91,70 @@ jobs:
 
     steps:
       - name: Code holen
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
+
+      - name: Projekt suchen
+        shell: bash
+        run: |
+          finde() { grep -rlF --include=CMakeLists.txt "project (NOVAKernfusion" "$1" 2>/dev/null | awk '{ print length, $0 }' | sort -n | head -n 1 | cut -d' ' -f2- || true; }
+          f="$(finde .)"
+          if [ -z "$f" ]; then
+            while IFS= read -r z; do
+              echo "Hochgeladene ZIP gefunden: $z – wird entpackt."
+              rm -rf _entpackt
+              7z x -y -o_entpackt "$z" > /dev/null || unzip -q -o "$z" -d _entpackt || true
+              f="$(finde _entpackt)"
+              [ -z "$f" ] || break
+            done < <(find . -path ./.git -prune -o -path ./_entpackt -prune -o -iname '*.zip' -print)
+          fi
+          if [ -z "$f" ]; then
+            echo "::error::Kernfusion nicht gefunden: Im Repo fehlt die CMakeLists.txt aus dem Ordner NOVA-Kernfusion. Bitte den INHALT des Ordners NOVA-Kernfusion hochladen (alle Ordner und Dateien)."
+            echo "Im Repo liegt gerade:"
+            find . -path ./.git -prune -o -print | head -n 60 || true
+            exit 1
+          fi
+          d="$(dirname "$f")"; d="${d#./}"
+          fehlt=""
+          for teil in modules/ms_core plugins/Kernfusion/Source plugins/Kernfusion/Resources scripts packaging tests; do
+            ort="$teil"; [ "$d" = "." ] || ort="$d/$teil"
+            [ -e "$ort" ] || { echo "::error::Im Repo fehlt der Ordner $ort – bitte nachträglich hochladen."; fehlt=1; }
+          done
+          [ -z "$fehlt" ] || exit 1
+          echo "Projekt liegt in: $d"
+          echo "KF=$d" >> "$GITHUB_ENV"
 
       - name: Konfigurieren
+        working-directory: ${{ env.KF }}
         run: cmake -B build -A x64 -DMS_BUILD_TESTS=ON
 
       - name: Bauen
+        working-directory: ${{ env.KF }}
         run: cmake --build build --config Release --target Kernfusion_VST3 KernfusionTests --parallel 4
 
       - name: Tests
         shell: bash
+        working-directory: ${{ env.KF }}
         run: ./build/tests/KernfusionTests_artefacts/Release/KernfusionTests.exe
 
       - name: Plugin pruefen (pluginval)
         shell: bash
+        working-directory: ${{ env.KF }}
         run: |
           curl -sSL -o pluginval.zip https://github.com/Tracktion/pluginval/releases/download/v1.0.4/pluginval_Windows.zip
-          unzip -q pluginval.zip -d pluginval
+          7z x -y -opluginval pluginval.zip > /dev/null
           ./pluginval/pluginval.exe --strictness-level 10 --skip-gui-tests --timeout-ms 300000 \
                 --validate "build/plugins/Kernfusion/Kernfusion_artefacts/Release/VST3/NOVA Kernfusion.vst3"
 
       - name: Paket bauen
         shell: pwsh
+        working-directory: ${{ env.KF }}
         run: ./scripts/package-windows.ps1
 
       - name: Ergebnis bereitstellen
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: NOVA-Kernfusion-Windows
-          path: dist/*
+          path: ${{ env.KF }}/dist/*
           if-no-files-found: error
 
   release:
